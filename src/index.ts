@@ -41,9 +41,9 @@ function parseArgs(): {
     }
   }
 
-  const owner = args.get("owner") ?? process.env["GITHUB_OWNER"];
-  const repo = args.get("repo") ?? process.env["GITHUB_REPO"];
-  const prRaw = args.get("pr") ?? process.env["PR_NUMBER"];
+  const owner = args.get("owner") ?? process.env["GITHUB_OWNER"]; // set automatically in GitHub Actions
+  const repo = args.get("repo") ?? process.env["GITHUB_REPO"];   // set automatically in GitHub Actions
+  const prRaw = args.get("pr") ?? process.env["PR_NUMBER"];       // set automatically in GitHub Actions
   const githubToken = process.env["GITHUB_TOKEN"];
 
   if (!owner || !repo || !prRaw) {
