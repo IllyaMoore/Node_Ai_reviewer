@@ -210,11 +210,26 @@ export async function submitReview(
     NEEDS_DISCUSSION: "COMMENT",
   };
 
-  await octokit.pulls.createReview({
-    owner,
-    repo,
-    pull_number: prNumber,
-    event: eventMap[verdict],
-    body,
-  });
+  try {
+    await octokit.pulls.createReview({
+      owner,
+      repo,
+      pull_number: prNumber,
+      event: eventMap[verdict],
+      body,
+    });
+  } catch (error: unknown) {
+    // Can't approve/request-changes on own PR — fall back to COMMENT
+    if (error instanceof Error && "status" in error && (error as { status: number }).status === 422) {
+      await octokit.pulls.createReview({
+        owner,
+        repo,
+        pull_number: prNumber,
+        event: "COMMENT",
+        body,
+      });
+      return;
+    }
+    throw error;
+  }
 }

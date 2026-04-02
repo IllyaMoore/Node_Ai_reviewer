@@ -1,25 +1,66 @@
-import { c, clear, hr } from "./terminal.js";
+import { c, clear, hr, scoreBar, truncate } from "./terminal.js";
 import { VERSION } from "../config.js";
 import type { OpenPR } from "../github.js";
 
-/** Prints the app banner and clears screen */
-export function printBanner(): void {
-  clear();
-  console.log(`
-${c.cyan}${c.bold}
-  ╔══════════════════════════════════════════╗
-  ║                                          ║
-  ║   NodeTS PR Bot                          ║
-  ║   Version  v${VERSION}                          ║
-  ║                                          ║
-  ╚══════════════════════════════════════════╝${c.reset}
-`);
+// ─── Session History ────────────────────────────────────────
+
+export interface HistoryEntry {
+  repo: string;
+  pr: number;
+  title: string;
+  verdict: string;
+  score: number;
+  time: string;
+  duration: number;
 }
 
-/** Prints CLI help text */
+const sessionHistory: HistoryEntry[] = [];
+
+/** Adds a review to session history */
+export function addToHistory(entry: HistoryEntry): void {
+  sessionHistory.push(entry);
+}
+
+/** Returns the session review history */
+export function getHistory(): HistoryEntry[] {
+  return sessionHistory;
+}
+
+// ─── Banner ─────────────────────────────────────────────────
+
+/** Prints the compact header bar */
+export function printBanner(): void {
+  clear();
+  console.log(`\n  ${c.yellow}${c.bold}NodeTS PR Bot${c.reset} ${c.dim}v${VERSION}${c.reset}\n`);
+}
+
+/** Main screen: header + status + menu. One unified layout. */
+export function printMainScreen(opts: {
+  username: string;
+  prCount: number;
+  mode: string;
+}): void {
+  clear();
+  console.log("");
+  console.log(`  ${c.yellow}${c.bold}NodeTS PR Bot${c.reset} ${c.dim}v${VERSION}${c.reset}`);
+  console.log(`  ${c.dim}${opts.username} · ${opts.prCount} open PRs · mode: ${opts.mode}${c.reset}`);
+  console.log("");
+  console.log(`  ${c.dim}${hr(40)}${c.reset}`);
+  console.log("");
+  console.log(`  ${c.yellow}1${c.reset}  Show open PRs`);
+  console.log(`  ${c.yellow}2${c.reset}  Review by URL`);
+  console.log(`  ${c.yellow}3${c.reset}  Rescan PRs`);
+  console.log(`  ${c.yellow}4${c.reset}  Settings`);
+  console.log(`  ${c.yellow}5${c.reset}  History`);
+  console.log(`  ${c.dim}q  Exit${c.reset}`);
+  console.log("");
+}
+
+// ─── Help ───────────────────────────────────────────────────
+
 export function printHelp(): void {
   console.log(`
-${c.bold}${c.cyan}  pr-review${c.reset} — AI code review for Node.js/TS/JS
+${c.bold}${c.yellow}  pr-review${c.reset} — AI code review for Node.js/TS/JS
 
 ${c.bold}USAGE${c.reset}
   ${c.green}pr-review${c.reset}                             ${c.dim}# interactive mode${c.reset}
@@ -43,65 +84,78 @@ ${c.bold}ENVIRONMENT${c.reset}
 `);
 }
 
-/** Formats a relative time string */
+// ─── PR Table ───────────────────────────────────────────────
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60_000);
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60) return `${mins}m`;
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
   const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  if (days < 30) return `${days}d`;
+  return `${Math.floor(days / 30)}mo`;
 }
 
-/** Displays PRs as a styled table */
+function staleBadge(dateStr: string): string {
+  const days = (Date.now() - new Date(dateStr).getTime()) / 86_400_000;
+  if (days > 14) return ` ${c.red}stale${c.reset}`;
+  if (days > 7) return ` ${c.yellow}aging${c.reset}`;
+  return "";
+}
+
 export function displayPRTable(prs: OpenPR[]): void {
   if (prs.length === 0) {
     console.log(`\n  ${c.dim}No open PRs found.${c.reset}\n`);
     return;
   }
 
-  console.log(`\n  ${c.bold}Found ${c.cyan}${prs.length}${c.reset}${c.bold} open PR${prs.length === 1 ? "" : "s"}:${c.reset}\n`);
-  console.log(`  ${hr(72)}`);
-  console.log(`  ${c.dim}  #   PR    Repository                  Title                    Updated${c.reset}`);
-  console.log(`  ${hr(72)}`);
-
+  console.log("");
   prs.forEach((pr, i) => {
-    const num = `${c.bold}${String(i + 1).padStart(3)}${c.reset}`;
-    const prNum = `${c.cyan}#${String(pr.number).padEnd(5)}${c.reset}`;
-    const repoStr = truncateStr(`${pr.owner}/${pr.repo}`, 26).padEnd(26);
-    const title = truncateStr(pr.title, 24).padEnd(24);
-    const updated = `${c.dim}${timeAgo(pr.updatedAt).padStart(7)}${c.reset}`;
-    const draft = pr.draft ? ` ${c.dim}[draft]${c.reset}` : "";
-    const size = pr.changedFiles > 0
-      ? ` ${c.green}+${pr.additions}${c.reset}${c.red}-${pr.deletions}${c.reset}`
-      : "";
+    const num = `${c.yellow}${String(i + 1).padStart(2)}${c.reset}`;
+    const repo = truncate(`${pr.owner}/${pr.repo}`, 28);
+    const prNum = `${c.dim}#${pr.number}${c.reset}`;
+    const title = `${c.dim}${truncate(pr.title, 40)}${c.reset}`;
+    const age = timeAgo(pr.updatedAt);
+    const badge = pr.draft ? `${c.dim} draft${c.reset}` : staleBadge(pr.updatedAt);
 
-    console.log(`  ${num}  ${prNum} ${repoStr} ${title} ${updated}${draft}${size}`);
+    console.log(`  ${num}  ${repo} ${prNum}  ${title}  ${c.dim}${age}${c.reset}${badge}`);
+  });
+  console.log("");
+}
+
+// ─── Review Summary ─────────────────────────────────────────
+
+export function printSummary(verdict: string, score: number, blocking: number, nonBlocking: number, praise: number, durationSec?: number): void {
+  const vc = verdict === "APPROVE" ? c.green : verdict === "REQUEST_CHANGES" ? c.red : c.yellow;
+
+  console.log("");
+  console.log(`  ${c.dim}${hr(36)}${c.reset}`);
+  console.log(`  ${c.bold}Verdict${c.reset}      ${vc}${c.bold}${verdict}${c.reset}`);
+  console.log(`  ${c.bold}Score${c.reset}        ${scoreBar(score)}`);
+  if (blocking > 0) console.log(`  ${c.bold}Blocking${c.reset}     ${c.red}${blocking}${c.reset}`);
+  if (nonBlocking > 0) console.log(`  ${c.bold}Warnings${c.reset}     ${c.yellow}${nonBlocking}${c.reset}`);
+  if (praise > 0) console.log(`  ${c.bold}Praise${c.reset}       ${c.dim}${praise}${c.reset}`);
+  if (durationSec !== undefined) console.log(`  ${c.bold}Time${c.reset}         ${c.dim}${durationSec.toFixed(1)}s${c.reset}`);
+  console.log(`  ${c.dim}${hr(36)}${c.reset}`);
+  console.log("");
+}
+
+// ─── Session History Display ────────────────────────────────
+
+export function displayHistory(): void {
+  if (sessionHistory.length === 0) {
+    console.log(`\n  ${c.dim}No reviews in this session yet.${c.reset}\n`);
+    return;
+  }
+
+  console.log(`\n  ${c.bold}Session History${c.reset} ${c.dim}(${sessionHistory.length} review${sessionHistory.length === 1 ? "" : "s"})${c.reset}\n`);
+
+  sessionHistory.forEach((h, i) => {
+    const vc = h.verdict === "APPROVE" ? c.green : h.verdict === "REQUEST_CHANGES" ? c.red : c.yellow;
+    const icon = h.verdict === "APPROVE" ? "✓" : h.verdict === "REQUEST_CHANGES" ? "✗" : "?";
+    console.log(`  ${c.dim}${String(i + 1).padStart(2)}.${c.reset} ${c.bold}${h.repo}${c.reset} #${h.pr} — ${vc}${icon} ${h.verdict}${c.reset} ${scoreBar(h.score)} ${c.dim}${h.duration.toFixed(1)}s${c.reset}`);
   });
 
-  console.log(`  ${hr(72)}\n`);
-}
-
-/** Local truncate to avoid circular dep with terminal.ts */
-function truncateStr(str: string, max: number): string {
-  return str.length > max ? str.slice(0, max - 1) + "…" : str;
-}
-
-/** Prints styled review summary */
-export function printSummary(verdict: string, score: number, blocking: number, nonBlocking: number, praise: number): void {
-  const vc = verdict === "APPROVE" ? c.green : verdict === "REQUEST_CHANGES" ? c.red : c.yellow;
-  const sc = score >= 7 ? c.green : score >= 4 ? c.yellow : c.red;
-
-  console.log(`
-  ${hr(34)}
-  ${c.bold}  Review Summary${c.reset}
-  ${hr(34)}
-    Verdict       ${vc}${c.bold}${verdict}${c.reset}
-    Score         ${sc}${c.bold}${score}/10${c.reset}
-    Blocking      ${blocking > 0 ? c.red : c.green}${blocking}${c.reset}
-    Non-blocking  ${c.yellow}${nonBlocking}${c.reset}
-    Praise        ${c.green}${praise}${c.reset}
-  ${hr(34)}
-`);
+  console.log("");
 }
