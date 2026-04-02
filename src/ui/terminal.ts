@@ -85,9 +85,10 @@ export function hr(width = 50, label?: string): string {
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/** Creates an animated spinner. Call .stop() when done. */
+/** Creates an animated spinner. Call .stop() when done. Auto-cleans after 5 min. */
 export function createSpinner(message: string): { stop: (finalMsg: string) => void; update: (msg: string) => void } {
   let i = 0;
+  let stopped = false;
   let currentMsg = message;
   stdout.write(c.hideCursor);
 
@@ -97,12 +98,25 @@ export function createSpinner(message: string): { stop: (finalMsg: string) => vo
     i++;
   }, 80);
 
+  // Auto-cleanup after 5 minutes to prevent leaked timers
+  const timeout = setTimeout(() => {
+    if (!stopped) {
+      stopped = true;
+      clearInterval(timer);
+      stdout.write(`${c.clearLine}${ts()} ${c.yellow}!${c.reset} Spinner timed out\n`);
+      stdout.write(c.showCursor);
+    }
+  }, 300_000);
+
   return {
     update(msg: string) {
       currentMsg = msg;
     },
     stop(finalMsg: string) {
+      if (stopped) return;
+      stopped = true;
       clearInterval(timer);
+      clearTimeout(timeout);
       stdout.write(`${c.clearLine}${ts()} ${c.green}✓${c.reset} ${finalMsg}\n`);
       stdout.write(c.showCursor);
     },
@@ -143,14 +157,11 @@ export function sleep(ms: number): Promise<void> {
 export function readKey(): Promise<string> {
   return new Promise((resolve) => {
     const { stdin } = process;
-    const wasRaw = stdin.isRaw;
     stdin.setRawMode(true);
     stdin.resume();
     stdin.once("data", (data: Buffer) => {
-      stdin.setRawMode(wasRaw);
-      stdin.pause();
+      stdin.setRawMode(false);
       const key = data.toString();
-      // Handle Ctrl+C
       if (key === "\x03") {
         stdout.write(c.showCursor);
         process.exit(0);
