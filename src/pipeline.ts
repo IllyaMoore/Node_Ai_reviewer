@@ -4,8 +4,8 @@ import { reviewPR } from "./review.js";
 import type { ReviewMode } from "./review.js";
 import { formatComment } from "./formatter.js";
 import { ReviewParseError } from "./types.js";
-import { c, log, logError, hr } from "./ui/terminal.js";
-import { printSummary } from "./ui/display.js";
+import { c, log, logError, hr, createSpinner } from "./ui/terminal.js";
+import { printSummary, addToHistory } from "./ui/display.js";
 
 /** Review pipeline configuration */
 export interface ReviewConfig {
@@ -26,15 +26,21 @@ export async function runReview(config: ReviewConfig): Promise<void> {
     log(`${c.yellow}Dry run mode${c.reset} — will not post to GitHub`);
   }
 
-  log(`Fetching PR ${c.cyan}#${prNumber}${c.reset} from ${c.bold}${owner}/${repo}${c.reset}...`);
+  // Fetch PR
+  const fetchSpinner = createSpinner(`Fetching PR ${c.yellow}#${prNumber}${c.reset} from ${c.bold}${owner}/${repo}${c.reset}...`);
   const prData = await fetchPRData(octokit, owner, repo, prNumber);
-  log(`Fetched: ${c.bold}"${prData.title}"${c.reset} ${c.dim}(${prData.files.length} files)${c.reset}`);
+  fetchSpinner.stop(`Fetched: ${c.bold}"${prData.title}"${c.reset} ${c.dim}(${prData.files.length} files)${c.reset}`);
 
-  log(`Sending to ${c.magenta}Claude${c.reset} for review ${c.dim}(${mode})${c.reset}...`);
+  // Review with spinner + timer
+  const reviewStart = Date.now();
+  const reviewSpinner = createSpinner(`Sending to ${c.magenta}Claude${c.reset} for review ${c.dim}(${mode})${c.reset}...`);
+
   let result;
   try {
     result = await reviewPR(prData, mode);
   } catch (error) {
+    const elapsed = ((Date.now() - reviewStart) / 1000).toFixed(1);
+    reviewSpinner.stop(`${c.red}Failed${c.reset} after ${elapsed}s`);
     if (error instanceof ReviewParseError) {
       logError("Claude returned unparseable response.");
       console.error(`${c.dim}Raw:${c.reset}`, error.rawText);
@@ -50,7 +56,9 @@ export async function runReview(config: ReviewConfig): Promise<void> {
     throw error;
   }
 
-  log(`Review complete!`);
+  const durationSec = (Date.now() - reviewStart) / 1000;
+  reviewSpinner.stop(`Review complete in ${c.yellow}${durationSec.toFixed(1)}s${c.reset}`);
+
   const comment = formatComment(result);
 
   if (dryRun) {
@@ -59,12 +67,22 @@ export async function runReview(config: ReviewConfig): Promise<void> {
     console.log(`${hr(60)}\n`);
     log(`${c.yellow}Dry run${c.reset} — skipped posting.`);
   } else {
-    log("Posting review comment...");
+    const postSpinner = createSpinner("Posting to GitHub...");
     await postReviewComment(octokit, owner, repo, prNumber, comment);
-    log("Submitting formal review...");
     await submitReview(octokit, owner, repo, prNumber, result.verdict, comment);
-    log(`${c.green}Posted to GitHub!${c.reset}`);
+    postSpinner.stop(`${c.green}Posted to GitHub!${c.reset}`);
   }
 
-  printSummary(result.verdict, result.score, result.blocking.length, result.non_blocking.length, result.praise.length);
+  // Track in session history
+  addToHistory({
+    repo: `${owner}/${repo}`,
+    pr: prNumber,
+    title: prData.title,
+    verdict: result.verdict,
+    score: result.score,
+    time: new Date().toTimeString().slice(0, 8),
+    duration: durationSec,
+  });
+
+  printSummary(result.verdict, result.score, result.blocking.length, result.non_blocking.length, result.praise.length, durationSec);
 }
