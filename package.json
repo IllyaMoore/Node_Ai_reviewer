@@ -3,10 +3,15 @@
   "version": "1.0.0",
   "description": "GitHub PR Review Bot powered by Claude",
   "type": "module",
+  "bin": {
+    "pr-review": "./dist/index.js"
+  },
   "scripts": {
     "dev": "tsx --env-file=.env src/index.ts",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
