@@ -4,7 +4,8 @@ import { reviewPR } from "./review.js";
 import type { ReviewMode } from "./review.js";
 import { formatComment } from "./formatter.js";
 import { ReviewParseError } from "./types.js";
-import { c, log, logError, hr, createSpinner } from "./ui/terminal.js";
+import type { PRData, ReviewResult } from "./types.js";
+import { c, log, logError, hr, createSpinner, readKey } from "./ui/terminal.js";
 import { printSummary, addToHistory } from "./ui/display.js";
 
 /** Review pipeline configuration */
@@ -17,27 +18,43 @@ export interface ReviewConfig {
   mode: ReviewMode;
 }
 
+/** Result returned from runReview for post-review actions */
+export interface ReviewOutcome {
+  result: ReviewResult;
+  prData: PRData;
+  comment: string;
+  durationSec: number;
+}
+
 /** Runs the full review pipeline: fetch → review → format → post */
-export async function runReview(config: ReviewConfig): Promise<void> {
+export async function runReview(config: ReviewConfig, previousReview?: ReviewResult): Promise<ReviewOutcome | null> {
   const { owner, repo, prNumber, githubToken, dryRun, mode } = config;
   const octokit = new Octokit({ auth: githubToken });
 
-  if (dryRun) {
+  if (dryRun && !previousReview) {
     log(`${c.yellow}Dry run mode${c.reset} — will not post to GitHub`);
   }
 
-  // Fetch PR
-  const fetchSpinner = createSpinner(`Fetching PR ${c.yellow}#${prNumber}${c.reset} from ${c.bold}${owner}/${repo}${c.reset}...`);
-  const prData = await fetchPRData(octokit, owner, repo, prNumber);
-  fetchSpinner.stop(`Fetched: ${c.bold}"${prData.title}"${c.reset} ${c.dim}(${prData.files.length} files)${c.reset}`);
+  // Fetch PR (skip if re-review, data already fetched)
+  let prData: PRData;
+  if (previousReview) {
+    const fetchSpinner = createSpinner(`Fetching PR ${c.yellow}#${prNumber}${c.reset}...`);
+    prData = await fetchPRData(octokit, owner, repo, prNumber);
+    fetchSpinner.stop(`Fetched ${c.dim}(${prData.files.length} files)${c.reset}`);
+  } else {
+    const fetchSpinner = createSpinner(`Fetching PR ${c.yellow}#${prNumber}${c.reset} from ${c.bold}${owner}/${repo}${c.reset}...`);
+    prData = await fetchPRData(octokit, owner, repo, prNumber);
+    fetchSpinner.stop(`Fetched: ${c.bold}"${prData.title}"${c.reset} ${c.dim}(${prData.files.length} files)${c.reset}`);
+  }
 
   // Review with spinner + timer
   const reviewStart = Date.now();
-  const reviewSpinner = createSpinner(`Sending to ${c.magenta}Claude${c.reset} for review ${c.dim}(${mode})${c.reset}...`);
+  const label = previousReview ? "Re-reviewing" : "Reviewing";
+  const reviewSpinner = createSpinner(`${label} with ${c.magenta}Claude${c.reset} ${c.dim}(${mode})${c.reset}...`);
 
-  let result;
+  let result: ReviewResult;
   try {
-    result = await reviewPR(prData, mode);
+    result = await reviewPR(prData, mode, previousReview);
   } catch (error) {
     const elapsed = ((Date.now() - reviewStart) / 1000).toFixed(1);
     reviewSpinner.stop(`${c.red}Failed${c.reset} after ${elapsed}s`);
@@ -57,18 +74,19 @@ export async function runReview(config: ReviewConfig): Promise<void> {
   }
 
   const durationSec = (Date.now() - reviewStart) / 1000;
-  reviewSpinner.stop(`Review complete in ${c.yellow}${durationSec.toFixed(1)}s${c.reset}`);
+  reviewSpinner.stop(`${label} complete in ${c.yellow}${durationSec.toFixed(1)}s${c.reset}`);
 
   const comment = formatComment(result);
 
+  // Show review output
+  console.log(`\n${hr(60)}`);
+  console.log(comment);
+  console.log(`${hr(60)}\n`);
+
   if (dryRun) {
-    console.log(`\n${hr(60)}`);
-    console.log(comment);
-    console.log(`${hr(60)}\n`);
-    log(`${c.yellow}Dry run${c.reset} — skipped posting.`);
+    log(`${c.yellow}Dry run${c.reset} — not posted yet.`);
   } else {
     const postSpinner = createSpinner("Posting to GitHub...");
-    await postReviewComment(octokit, owner, repo, prNumber, comment);
     await submitReview(octokit, owner, repo, prNumber, result.verdict, comment);
     postSpinner.stop(`${c.green}Posted to GitHub!${c.reset}`);
   }
@@ -85,4 +103,39 @@ export async function runReview(config: ReviewConfig): Promise<void> {
   });
 
   printSummary(result.verdict, result.score, result.blocking.length, result.non_blocking.length, result.praise.length, durationSec);
+
+  // Post-review actions
+  await postReviewActions(config, result, prData, comment);
+
+  return { result, prData, comment, durationSec };
+}
+
+/** Shows post-review action menu */
+async function postReviewActions(config: ReviewConfig, result: ReviewResult, _prData: PRData, comment: string): Promise<void> {
+  const { owner, repo, prNumber, githubToken, dryRun } = config;
+  const octokit = new Octokit({ auth: githubToken });
+
+  const canPost = dryRun;
+  const canReReview = result.verdict !== "APPROVE";
+
+  if (!canPost && !canReReview) return;
+
+  const options: string[] = [];
+  if (canPost) options.push(`${c.yellow}p${c.reset}  Post this review to GitHub`);
+  if (canReReview) options.push(`${c.yellow}r${c.reset}  Re-review with previous context`);
+  options.push(`${c.dim}any other key to continue${c.reset}`);
+
+  console.log(`  ${options.join("\n  ")}`);
+
+  const key = await readKey();
+
+  if (key === "p" && canPost) {
+    const postSpinner = createSpinner("Posting to GitHub...");
+    await submitReview(octokit, owner, repo, prNumber, result.verdict, comment);
+    postSpinner.stop(`${c.green}Posted to GitHub!${c.reset}`);
+  } else if (key === "r" && canReReview) {
+    console.log("");
+    log(`Re-reviewing with previous context...`);
+    await runReview(config, result);
+  }
 }
