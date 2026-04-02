@@ -102,12 +102,12 @@ function truncateDiff(diff: string): string {
  * @returns Parsed and validated ReviewResult
  * @throws ReviewParseError if response cannot be parsed
  */
-export async function reviewPR(prData: PRData, mode: ReviewMode = "default"): Promise<ReviewResult> {
+export async function reviewPR(prData: PRData, mode: ReviewMode = "default", previousReview?: ReviewResult): Promise<ReviewResult> {
   const client = new Anthropic();
   const truncatedDiff = truncateDiff(prData.diff);
   const changedFiles = prData.files.map((f) => f.filename).join("\n  ");
 
-  const userMessage = `Review this PR.
+  let userMessage = `Review this PR.
 
 **Title:** ${prData.title}
 **Description:** ${prData.body ?? "None"}
@@ -117,6 +117,19 @@ export async function reviewPR(prData: PRData, mode: ReviewMode = "default"): Pr
 \`\`\`diff
 ${truncatedDiff}
 \`\`\``;
+
+  if (previousReview) {
+    userMessage += `
+
+---
+**PREVIOUS REVIEW CONTEXT** (re-review requested):
+Previous verdict: ${previousReview.verdict}, score: ${previousReview.score}/10
+Blocking issues found: ${previousReview.blocking.map((b) => `${b.file}:${b.line} [${b.severity}] ${b.issue}`).join("; ") || "none"}
+Non-blocking: ${previousReview.non_blocking.map((b) => `${b.file}:${b.line} [${b.severity}] ${b.issue}`).join("; ") || "none"}
+Questions: ${previousReview.questions.join("; ") || "none"}
+
+Focus on whether the previously flagged issues are valid. Be more careful and re-evaluate.`;
+  }
 
   const response = await client.messages.create({
     model: MODEL,
