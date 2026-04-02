@@ -101,6 +101,6 @@ export async function cliScanMode(): Promise<void> {
   });
 
   stdout.write(c.clearLine);
-  log(`Found ${c.cyan}${prs.length}${c.reset} open PR${prs.length === 1 ? "" : "s"}.`);
+  log(`Found ${c.yellow}${prs.length}${c.reset} open PR${prs.length === 1 ? "" : "s"}.`);
   displayPRTable(prs);
 }

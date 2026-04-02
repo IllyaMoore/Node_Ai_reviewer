@@ -35,7 +35,7 @@ export function checkTokens(): { githubToken: string } {
   }
   if (!process.env["ANTHROPIC_API_KEY"]) {
     logError("ANTHROPIC_API_KEY is not set.");
-    console.error(`\n  Get a key at ${c.cyan}https://console.anthropic.com/settings/keys${c.reset}\n`);
+    console.error(`\n  Get a key at ${c.yellow}https://console.anthropic.com/settings/keys${c.reset}\n`);
     process.exit(1);
   }
   return { githubToken };
