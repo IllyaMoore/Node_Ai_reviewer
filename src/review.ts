@@ -96,8 +96,13 @@ ${JSON_SCHEMA}`,
  */
 function buildFallbackApprove(error: APIError): ReviewResult {
   const reason = extractAPIErrorReason(error);
+  const summary =
+    `💸 **The reviewer has left the building.** Reason: ${reason}.\n\n` +
+    `The code-critique department is closed for maintenance (or for not paying rent). ` +
+    `Auto-approving so the pipeline isn't held hostage — a human reviewer should still take a look.\n\n` +
+    `Please enjoy this farewell ballad while you wait: [🎵 Still Alive](https://www.youtube.com/watch?v=zAuDS7wni0Y)`;
   return {
-    summary: `Automated review skipped: ${reason}. Auto-approving so the pipeline isn't blocked — a human reviewer should still check this PR.`,
+    summary,
     verdict: "APPROVE",
     score: 5,
     blocking: [],
