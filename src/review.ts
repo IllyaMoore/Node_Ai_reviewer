@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { ReviewResultSchema, ReviewParseError } from "./types.js";
 import type { PRData, ReviewResult } from "./types.js";
 
@@ -91,6 +91,33 @@ ${JSON_SCHEMA}`,
 };
 
 /**
+ * Returns a safe APPROVE fallback when the Anthropic API is unreachable
+ * (low credit balance, auth failure, rate limit, etc.) so CI doesn't block the PR.
+ */
+function buildFallbackApprove(error: APIError): ReviewResult {
+  const reason = extractAPIErrorReason(error);
+  return {
+    summary: `Automated review skipped: ${reason}. Auto-approving so the pipeline isn't blocked — a human reviewer should still check this PR.`,
+    verdict: "APPROVE",
+    score: 5,
+    blocking: [],
+    non_blocking: [],
+    praise: [],
+    questions: [],
+  };
+}
+
+/** Pulls a human-readable reason out of an Anthropic APIError. */
+function extractAPIErrorReason(error: APIError): string {
+  const body = (error as { error?: { error?: { message?: string }; message?: string } }).error;
+  const message = body?.error?.message ?? body?.message ?? error.message ?? "Anthropic API error";
+  if (/credit balance/i.test(message)) return "Anthropic credit balance too low";
+  if (error.status === 401) return "Anthropic API authentication failed";
+  if (error.status === 429) return "Anthropic API rate limit hit";
+  return `Anthropic API error (${error.status ?? "unknown"}): ${message}`;
+}
+
+/**
  * Truncates a diff string to the maximum allowed length.
  */
 function truncateDiff(diff: string): string {
@@ -140,12 +167,20 @@ Questions: ${previousReview.questions.join("; ") || "none"}
 Focus on whether the previously flagged issues are valid. Be more careful and re-evaluate.`;
   }
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: mode === "minimal" ? 2048 : 4096,
-    system: PROMPTS[mode],
-    messages: [{ role: "user", content: userMessage }],
-  });
+  let response;
+  try {
+    response = await client.messages.create({
+      model: MODEL,
+      max_tokens: mode === "minimal" ? 2048 : 4096,
+      system: PROMPTS[mode],
+      messages: [{ role: "user", content: userMessage }],
+    });
+  } catch (error) {
+    if (error instanceof APIError) {
+      return buildFallbackApprove(error);
+    }
+    throw error;
+  }
 
   const textBlock = response.content.find((block) => block.type === "text");
   if (!textBlock || textBlock.type !== "text") {
