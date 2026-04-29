@@ -7,7 +7,7 @@ import { runPerformanceSpecialist } from "./agents/performance.js";
 import { runTestsSpecialist } from "./agents/tests.js";
 import { runDependenciesSpecialist } from "./agents/dependencies.js";
 import { APIError, describeAPIError } from "./agents/runner.js";
-import type { AgentRunResult, AgentTelemetry } from "./agents/types.js";
+import type { AgentTelemetry } from "./agents/types.js";
 import { decideGate, gateAutoApprove } from "./preflight.js";
 import { fetchClaudeMd, formatClaudeMdContext } from "./context/fetchClaudeMd.js";
 import { selectSpecialists } from "./context/selectSpecialists.js";
@@ -81,7 +81,9 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
     // Stage 1 — context enrichment (CLAUDE.md). Best-effort; failures are silent.
     const projectRules = await loadProjectRules(input);
 
-    // Stage 2 — detect (correctness + specialists in parallel)
+    // Stage 2 — detect (correctness + specialists in parallel).
+    // Specialist failures degrade silently — losing one specialist beats killing
+    // the whole review. Correctness is the broad reviewer; if it fails, we stop.
     const correctnessPromise = runCorrectnessAgent({
       prData: input.prData,
       previous: input.previous,
@@ -89,16 +91,16 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
     });
 
     const specialistInput = { prData: input.prData, projectRules };
-    const specialistPromises: Promise<AgentRunResult<ReviewComment[]>>[] = specialists.map(
-      (name) => SPECIALISTS[name](specialistInput)
-    );
+    const specialistPromises = specialists.map((name) => safeSpecialist(name, specialistInput));
 
     const [correctnessRun, ...specialistRuns] = await Promise.all([correctnessPromise, ...specialistPromises]);
     telemetry.push(correctnessRun.telemetry);
-    for (const sr of specialistRuns) telemetry.push(sr.telemetry);
+    for (const sr of specialistRuns) {
+      if (sr.telemetry) telemetry.push(sr.telemetry);
+    }
 
     const candidate = correctnessRun.output;
-    const specialistFindings = specialistRuns.flatMap((sr) => sr.output);
+    const specialistFindings = specialistRuns.flatMap((sr) => sr.findings);
 
     // Stage 3 — aggregate (pre-validate)
     const merged = dedupeFindings([...candidate.blocking, ...candidate.non_blocking, ...specialistFindings]);
@@ -113,18 +115,21 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
       return { result, telemetry, rejected: [], fallback: false, gated: false, specialists };
     }
 
-    // Stage 4 — validate (parallel)
+    // Stage 4 — validate (parallel). Validator failures default to confirmed=true
+    // so we don't silently drop real findings on a parse hiccup.
     const validations = await Promise.all(
-      merged.map((finding) => runValidator({ prData: input.prData, finding }))
+      merged.map((finding) => safeValidate(input.prData, finding))
     );
-    validations.forEach((v) => telemetry.push(v.telemetry));
+    for (const v of validations) {
+      if (v.telemetry) telemetry.push(v.telemetry);
+    }
 
     // Stage 5 — aggregate (post-validate)
     const confirmed: ReviewComment[] = [];
     const rejected: Array<{ finding: ReviewComment; reason: string }> = [];
     for (let i = 0; i < merged.length; i++) {
       const finding = merged[i]!;
-      const v = validations[i]!.output;
+      const v = validations[i]!;
       if (v.confirmed) confirmed.push(finding);
       else rejected.push({ finding, reason: v.reason });
     }
@@ -168,6 +173,46 @@ async function loadProjectRules(input: OrchestratorInput): Promise<string | unde
     return formatted.length > 0 ? formatted : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Runs a specialist and degrades to an empty findings list on failure.
+ * Specialist failures are logged to stderr so the CI log surfaces them, but they
+ * don't kill the overall review — losing one specialist beats killing everything.
+ */
+async function safeSpecialist(
+  name: keyof typeof SPECIALISTS,
+  input: { prData: PRData; projectRules?: string }
+): Promise<{ findings: ReviewComment[]; telemetry?: AgentTelemetry }> {
+  try {
+    const run = await SPECIALISTS[name](input);
+    return { findings: run.output, telemetry: run.telemetry };
+  } catch (error) {
+    if (error instanceof APIError) throw error;
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[orchestrator] specialist "${name}" failed: ${msg} — continuing without its findings`);
+    return { findings: [] };
+  }
+}
+
+/**
+ * Runs the validator and defaults to confirmed=true on failure. We prefer the
+ * occasional false positive over silently dropping a real finding because the
+ * validator hallucinated a preamble.
+ */
+async function safeValidate(
+  prData: PRData,
+  finding: ReviewComment
+): Promise<{ confirmed: boolean; reason: string; telemetry?: AgentTelemetry }> {
+  try {
+    const run = await runValidator({ prData, finding });
+    return { confirmed: run.output.confirmed, reason: run.output.reason, telemetry: run.telemetry };
+  } catch (error) {
+    if (error instanceof APIError) throw error;
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[orchestrator] validator failed for ${finding.file}:${finding.line} — keeping finding (${msg})`);
+    return { confirmed: true, reason: "validator failed; finding preserved by default" };
   }
 }
 

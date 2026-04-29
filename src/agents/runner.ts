@@ -54,14 +54,27 @@ export async function runAgent<I>(req: AgentRequest<I>, input: I): Promise<{ tex
   };
 }
 
-/** Strips optional ```json fences and validates the payload against a Zod schema. */
+/**
+ * Extracts a JSON payload from a model response and validates it against a Zod schema.
+ *
+ * Handles three common variants:
+ *   1. Pure JSON.
+ *   2. JSON wrapped in ```json fences.
+ *   3. JSON preceded or followed by free-form prose ("Here's my analysis: { ... }").
+ *
+ * For (3) we scan for the first `{` or `[` and use a brace/bracket-balanced
+ * extractor that respects strings and escapes — picking the substring up to the
+ * matching closer.
+ */
 export function parseJsonOutput<T>(rawText: string, schema: ZodType<T>, agentName: string): T {
-  const trimmed = rawText.trim();
-  const stripped = trimmed.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+  const candidate = extractJson(rawText);
+  if (candidate === null) {
+    throw new ReviewParseError(`Agent "${agentName}" returned no parseable JSON`, rawText);
+  }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripped);
+    parsed = JSON.parse(candidate);
   } catch {
     throw new ReviewParseError(`Agent "${agentName}" returned invalid JSON`, rawText);
   }
@@ -71,6 +84,55 @@ export function parseJsonOutput<T>(rawText: string, schema: ZodType<T>, agentNam
     throw new ReviewParseError(`Agent "${agentName}" schema validation failed: ${result.error.message}`, rawText);
   }
   return result.data;
+}
+
+/** Finds the first JSON object or array in text and returns the balanced substring. */
+function extractJson(rawText: string): string | null {
+  const fenced = rawText.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
+  const text = fenced.length > 0 ? fenced : rawText;
+
+  const firstObj = text.indexOf("{");
+  const firstArr = text.indexOf("[");
+  let start: number;
+  let openCh: "{" | "[";
+  if (firstObj === -1 && firstArr === -1) return null;
+  if (firstObj === -1) {
+    start = firstArr;
+    openCh = "[";
+  } else if (firstArr === -1 || firstObj < firstArr) {
+    start = firstObj;
+    openCh = "{";
+  } else {
+    start = firstArr;
+    openCh = "[";
+  }
+  const closeCh: "}" | "]" = openCh === "{" ? "}" : "]";
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === openCh) depth++;
+    else if (ch === closeCh) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 /** Re-export so callers can detect Anthropic-side errors without importing the SDK directly. */
