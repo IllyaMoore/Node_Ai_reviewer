@@ -3,7 +3,6 @@ import { parseArgs } from "node:util";
 import { Octokit } from "@octokit/rest";
 import { VERSION, checkTokens } from "./config.js";
 import { scanOpenPRs } from "./github.js";
-import type { ReviewMode } from "./review.js";
 import type { ReviewConfig } from "./pipeline.js";
 import { c, log, logError, progressBar, truncate } from "./ui/terminal.js";
 import { printHelp, displayPRTable } from "./ui/display.js";
@@ -15,7 +14,6 @@ export function parseCLI(): "interactive" | "scan" | ReviewConfig {
       owner: { type: "string" },
       repo: { type: "string" },
       pr: { type: "string" },
-      mode: { type: "string" },
       scan: { type: "boolean", default: false },
       "dry-run": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
@@ -71,12 +69,8 @@ export function parseCLI(): "interactive" | "scan" | ReviewConfig {
     process.exit(1);
   }
 
-  const modeRaw = typeof values.mode === "string" ? values.mode : "minimal";
-  const validModes: ReviewMode[] = ["minimal", "default", "strict"];
-  const mode: ReviewMode = validModes.includes(modeRaw as ReviewMode) ? (modeRaw as ReviewMode) : "minimal";
-
   const { githubToken } = checkTokens();
-  return { owner, repo, prNumber, githubToken, dryRun, mode };
+  return { owner, repo, prNumber, githubToken, dryRun };
 }
 
 /** CLI scan mode: scan and display open PRs then exit */

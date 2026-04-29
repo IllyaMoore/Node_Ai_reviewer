@@ -1,8 +1,8 @@
 import { Octokit } from "@octokit/rest";
-import { fetchPRData, postReviewComment, submitReview } from "./github.js";
-import { reviewPR } from "./review.js";
-import type { ReviewMode } from "./review.js";
-import { formatComment } from "./formatter.js";
+import { fetchPRData, postReviewComment, submitReview, buildCommentableMap } from "./github.js";
+import { orchestrate } from "./orchestrator.js";
+import type { AgentTelemetry } from "./agents/types.js";
+import { formatComment, formatTopLevelSummary, buildInlineComments } from "./formatter.js";
 import { ReviewParseError } from "./types.js";
 import type { PRData, ReviewResult } from "./types.js";
 import { c, log, logError, hr, createSpinner, readKey } from "./ui/terminal.js";
@@ -15,7 +15,6 @@ export interface ReviewConfig {
   prNumber: number;
   githubToken: string;
   dryRun: boolean;
-  mode: ReviewMode;
 }
 
 /** Result returned from runReview for post-review actions */
@@ -28,7 +27,7 @@ export interface ReviewOutcome {
 
 /** Runs the full review pipeline: fetch → review → format → post */
 export async function runReview(config: ReviewConfig, previousReview?: ReviewResult): Promise<ReviewOutcome | null> {
-  const { owner, repo, prNumber, githubToken, dryRun, mode } = config;
+  const { owner, repo, prNumber, githubToken, dryRun } = config;
   const octokit = new Octokit({ auth: githubToken });
 
   if (dryRun && !previousReview) {
@@ -50,11 +49,20 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
   // Review with spinner + timer
   const reviewStart = Date.now();
   const label = previousReview ? "Re-reviewing" : "Reviewing";
-  const reviewSpinner = createSpinner(`${label} with ${c.magenta}Claude${c.reset} ${c.dim}(${mode})${c.reset}...`);
+  const reviewSpinner = createSpinner(`${label} with ${c.magenta}Claude${c.reset} multi-agent pipeline...`);
 
   let result: ReviewResult;
+  let gated = false;
+  let rejectedCount = 0;
+  let specialists: string[] = [];
+  let telemetry: AgentTelemetry[] = [];
   try {
-    result = await reviewPR(prData, mode, previousReview);
+    const out = await orchestrate({ prData, previous: previousReview, octokit, owner, repo });
+    result = out.result;
+    gated = out.gated;
+    rejectedCount = out.rejected.length;
+    specialists = out.specialists;
+    telemetry = out.telemetry;
   } catch (error) {
     const elapsed = ((Date.now() - reviewStart) / 1000).toFixed(1);
     reviewSpinner.stop(`${c.red}Failed${c.reset} after ${elapsed}s`);
@@ -74,21 +82,47 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
   }
 
   const durationSec = (Date.now() - reviewStart) / 1000;
-  reviewSpinner.stop(`${label} complete in ${c.yellow}${durationSec.toFixed(1)}s${c.reset}`);
+  const tail = gated
+    ? `${c.green}gated${c.reset}`
+    : rejectedCount > 0
+    ? `${c.dim}(${rejectedCount} dropped by validator)${c.reset}`
+    : "";
+  reviewSpinner.stop(`${label} complete in ${c.yellow}${durationSec.toFixed(1)}s${c.reset} ${tail}`);
 
-  const comment = formatComment(result);
+  // Print per-agent telemetry — useful in CI logs to see which agents fired and what they cost.
+  if (telemetry.length > 0) {
+    const specList = specialists.length > 0 ? `[${specialists.join(", ")}]` : "[none]";
+    console.log(`${c.dim}Specialists:${c.reset} ${specList}`);
+    for (const t of telemetry) {
+      const tokens = t.inputTokens !== undefined && t.outputTokens !== undefined
+        ? ` ${c.dim}${t.inputTokens}↗${t.outputTokens}↘${c.reset}`
+        : "";
+      console.log(`  ${c.dim}-${c.reset} ${t.name.padEnd(12)} ${c.dim}${t.model}${c.reset}  ${(t.durationMs / 1000).toFixed(2)}s${tokens}`);
+    }
+  }
 
-  // Show review output
+  // Terminal: full breakdown for the human watching.
+  const fullComment = formatComment(result);
   console.log(`\n${hr(60)}`);
-  console.log(comment);
+  console.log(fullComment);
   console.log(`${hr(60)}\n`);
+
+  // GitHub: short summary as review body, per-finding inline comments.
+  const inline = buildInlineComments(result);
+  const commentable = buildCommentableMap(prData.files);
+  const wouldDrop = inline.filter((ic) => !commentable.get(ic.path)?.has(ic.line)).length;
+  const summaryBody = formatTopLevelSummary(result, { droppedInline: wouldDrop });
 
   if (dryRun) {
     log(`${c.yellow}Dry run${c.reset} — not posted yet.`);
   } else {
     const postSpinner = createSpinner("Posting to GitHub...");
-    await submitReview(octokit, owner, repo, prNumber, result.verdict, comment);
-    postSpinner.stop(`${c.green}Posted to GitHub!${c.reset}`);
+    const { posted, dropped } = await submitReview(
+      octokit, owner, repo, prNumber, result.verdict, summaryBody, inline, commentable
+    );
+    postSpinner.stop(
+      `${c.green}Posted${c.reset} ${c.dim}(${posted} inline${dropped.length ? `, ${dropped.length} fell back to summary` : ""})${c.reset}`
+    );
   }
 
   // Track in session history
@@ -104,14 +138,23 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
 
   printSummary(result.verdict, result.score, result.blocking.length, result.non_blocking.length, result.praise.length, durationSec);
 
-  // Post-review actions
-  await postReviewActions(config, result, prData, comment);
+  // Post-review actions (interactive only — no-op in CI / non-TTY)
+  await postReviewActions(config, result, prData, summaryBody, inline, commentable);
 
-  return { result, prData, comment, durationSec };
+  return { result, prData, comment: summaryBody, durationSec };
 }
 
-/** Shows post-review action menu */
-async function postReviewActions(config: ReviewConfig, result: ReviewResult, _prData: PRData, comment: string): Promise<void> {
+/** Shows post-review action menu. Skipped automatically in CI / non-TTY environments. */
+async function postReviewActions(
+  config: ReviewConfig,
+  result: ReviewResult,
+  _prData: PRData,
+  summaryBody: string,
+  inline: ReturnType<typeof buildInlineComments>,
+  commentable: Map<string, Set<number>>
+): Promise<void> {
+  if (!process.stdin.isTTY) return;
+
   const { owner, repo, prNumber, githubToken, dryRun } = config;
   const octokit = new Octokit({ auth: githubToken });
 
@@ -131,7 +174,7 @@ async function postReviewActions(config: ReviewConfig, result: ReviewResult, _pr
 
   if (key === "p" && canPost) {
     const postSpinner = createSpinner("Posting to GitHub...");
-    await submitReview(octokit, owner, repo, prNumber, result.verdict, comment);
+    await submitReview(octokit, owner, repo, prNumber, result.verdict, summaryBody, inline, commentable);
     postSpinner.stop(`${c.green}Posted to GitHub!${c.reset}`);
   } else if (key === "r" && canReReview) {
     console.log("");
