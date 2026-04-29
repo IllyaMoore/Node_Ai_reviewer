@@ -38,20 +38,18 @@ export function printBanner(): void {
 export function printMainScreen(opts: {
   username: string;
   prCount: number;
-  mode: string;
 }): void {
   clear();
   console.log("");
   console.log(`  ${c.yellow}${c.bold}NodeTS PR Bot${c.reset} ${c.dim}v${VERSION}${c.reset}`);
-  console.log(`  ${c.dim}${opts.username} · ${opts.prCount} open PRs · mode: ${opts.mode}${c.reset}`);
+  console.log(`  ${c.dim}${opts.username} · ${opts.prCount} open PRs${c.reset}`);
   console.log("");
   console.log(`  ${c.dim}${hr(40)}${c.reset}`);
   console.log("");
   console.log(`  ${c.yellow}1${c.reset}  Show open PRs`);
   console.log(`  ${c.yellow}2${c.reset}  Review by URL`);
   console.log(`  ${c.yellow}3${c.reset}  Rescan PRs`);
-  console.log(`  ${c.yellow}4${c.reset}  Settings`);
-  console.log(`  ${c.yellow}5${c.reset}  History`);
+  console.log(`  ${c.yellow}4${c.reset}  History`);
   console.log(`  ${c.dim}q  Exit${c.reset}`);
   console.log("");
 }
@@ -74,7 +72,6 @@ ${c.bold}OPTIONS${c.reset}
   ${c.yellow}--pr${c.reset}          Pull request number
   ${c.yellow}--scan${c.reset}        Scan for open PRs across your repos
   ${c.yellow}--dry-run${c.reset}     Review locally without posting to GitHub
-  ${c.yellow}--mode${c.reset}        Review mode: minimal, default, strict
   ${c.yellow}--help${c.reset}        Show this help
   ${c.yellow}--version${c.reset}     Show version
 

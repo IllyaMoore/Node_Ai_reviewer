@@ -5,7 +5,6 @@ import { checkTokens } from "./config.js";
 import { scanOpenPRs, getAuthenticatedUser } from "./github.js";
 import type { OpenPR } from "./github.js";
 import { runReview } from "./pipeline.js";
-import type { ReviewMode } from "./review.js";
 import { c, log, logError, progressBar, truncate, clear, readKey } from "./ui/terminal.js";
 import { ask } from "./ui/prompts.js";
 import { printBanner, printMainScreen, displayPRTable, displayHistory } from "./ui/display.js";
@@ -39,19 +38,8 @@ export async function interactiveMode(): Promise<void> {
     log(`${c.yellow}Could not scan PRs${c.reset}`);
   }
 
-  let currentMode: ReviewMode = "minimal";
-
-  const modeLabel = (): string => {
-    const map: Record<ReviewMode, string> = {
-      minimal: `${c.green}minimal${c.reset}`,
-      default: `default`,
-      strict: `${c.red}strict${c.reset}`,
-    };
-    return map[currentMode];
-  };
-
   const drawMenu = (): void => {
-    printMainScreen({ username, prCount: cachedPRs.length, mode: modeLabel() });
+    printMainScreen({ username, prCount: cachedPRs.length });
   };
 
   while (true) {
@@ -60,11 +48,11 @@ export async function interactiveMode(): Promise<void> {
 
     switch (key) {
       case "1": {
-        await menuShowPRs(cachedPRs, githubToken, currentMode);
+        await menuShowPRs(cachedPRs, githubToken);
         break;
       }
       case "2": {
-        await menuReviewByURL(githubToken, currentMode);
+        await menuReviewByURL(githubToken);
         break;
       }
       case "3": {
@@ -85,11 +73,7 @@ export async function interactiveMode(): Promise<void> {
         await readKey();
         break;
       }
-      case "4": {
-        currentMode = await menuSettings(currentMode);
-        break;
-      }
-      case "5":
+      case "4":
       case "h": {
         clear();
         printBanner();
@@ -110,30 +94,7 @@ export async function interactiveMode(): Promise<void> {
 
 // ─── Sub-menus ──────────────────────────────────────────────
 
-async function menuSettings(currentMode: ReviewMode): Promise<ReviewMode> {
-  clear();
-  printBanner();
-
-  const modes: ReviewMode[] = ["minimal", "default", "strict"];
-  const desc: Record<ReviewMode, string> = {
-    minimal: "only blocking issues, ultra-short",
-    default: "balanced review",
-    strict: "thorough, flag everything",
-  };
-
-  console.log(`  ${c.bold}Review mode${c.reset}\n`);
-  modes.forEach((m, i) => {
-    const cur = m === currentMode ? ` ${c.green}<-${c.reset}` : "";
-    console.log(`  ${c.yellow}${i + 1}${c.reset}  ${m.padEnd(10)} ${c.dim}${desc[m]}${c.reset}${cur}`);
-  });
-  console.log(`\n  ${c.dim}Press 1-3 or any key to go back${c.reset}`);
-
-  const key = await readKey();
-  const map: Record<string, ReviewMode> = { "1": "minimal", "2": "default", "3": "strict" };
-  return map[key] ?? currentMode;
-}
-
-async function menuShowPRs(prs: OpenPR[], githubToken: string, mode: ReviewMode): Promise<void> {
+async function menuShowPRs(prs: OpenPR[], githubToken: string): Promise<void> {
   clear();
   printBanner();
   displayPRTable(prs);
@@ -169,13 +130,12 @@ async function menuShowPRs(prs: OpenPR[], githubToken: string, mode: ReviewMode)
     prNumber: selected.number,
     githubToken,
     dryRun,
-    mode,
   });
   console.log(`  ${c.dim}Press any key...${c.reset}`);
   await readKey();
 }
 
-async function menuReviewByURL(githubToken: string, mode: ReviewMode): Promise<void> {
+async function menuReviewByURL(githubToken: string): Promise<void> {
   clear();
   printBanner();
 
@@ -203,7 +163,7 @@ async function menuReviewByURL(githubToken: string, mode: ReviewMode): Promise<v
 
   clear();
   printBanner();
-  await runReview({ owner: owner!, repo: repo!, prNumber, githubToken, dryRun, mode });
+  await runReview({ owner: owner!, repo: repo!, prNumber, githubToken, dryRun });
   console.log(`  ${c.dim}Press any key...${c.reset}`);
   await readKey();
 }
