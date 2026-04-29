@@ -117,12 +117,29 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
     log(`${c.yellow}Dry run${c.reset} — not posted yet.`);
   } else {
     const postSpinner = createSpinner("Posting to GitHub...");
-    const { posted, dropped } = await submitReview(
-      octokit, owner, repo, prNumber, result.verdict, summaryBody, inline, commentable
-    );
-    postSpinner.stop(
-      `${c.green}Posted${c.reset} ${c.dim}(${posted} inline${dropped.length ? `, ${dropped.length} fell back to summary` : ""})${c.reset}`
-    );
+    try {
+      const { posted, dropped } = await submitReview(
+        octokit, owner, repo, prNumber, result.verdict, summaryBody, inline, commentable
+      );
+      postSpinner.stop(
+        `${c.green}Posted${c.reset} ${c.dim}(${posted} inline${dropped.length ? `, ${dropped.length} fell back to summary` : ""})${c.reset}`
+      );
+    } catch (error) {
+      const status = error instanceof Error && "status" in error
+        ? (error as { status: number }).status
+        : undefined;
+      const reason = error instanceof Error ? error.message : String(error);
+      postSpinner.stop(`${c.red}Review post rejected${c.reset} ${c.dim}(${status ?? "unknown"})${c.reset}`);
+      // Last-ditch fallback: try a plain issue comment so the review isn't lost.
+      try {
+        await postReviewComment(octokit, owner, repo, prNumber, summaryBody);
+        log(`${c.yellow}Posted as plain issue comment instead${c.reset} ${c.dim}(${reason})${c.reset}`);
+      } catch (commentError) {
+        const commentReason = commentError instanceof Error ? commentError.message : String(commentError);
+        logError(`Could not post review or comment: ${commentReason}`);
+        // Don't fail the workflow — the review was produced and printed; this is operator-fixable.
+      }
+    }
   }
 
   // Track in session history

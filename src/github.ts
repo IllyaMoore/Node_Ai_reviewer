@@ -278,9 +278,13 @@ export async function submitReview(
   try {
     await octokit.pulls.createReview(payload);
   } catch (error: unknown) {
-    // 422 commonly means: review on own PR (can't APPROVE/REQUEST_CHANGES) OR
-    // a stale inline comment slipped past our filter. Retry as COMMENT, body-only.
-    if (error instanceof Error && "status" in error && (error as { status: number }).status === 422) {
+    const status = error instanceof Error && "status" in error
+      ? (error as { status: number }).status
+      : undefined;
+    // 401/403: token cannot APPROVE/REQUEST_CHANGES (forked PRs, restricted bot perms).
+    // 422: review on own PR, or a stale inline comment slipped past our filter.
+    // In all three cases, retry as a plain COMMENT review without inline comments.
+    if (status === 401 || status === 403 || status === 422) {
       await octokit.pulls.createReview({
         owner,
         repo,
