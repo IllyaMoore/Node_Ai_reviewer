@@ -54,6 +54,7 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
   let result: ReviewResult;
   let gated = false;
   let rejectedCount = 0;
+  let rejectedQuestionCount = 0;
   let specialists: string[] = [];
   let telemetry: AgentTelemetry[] = [];
   try {
@@ -61,6 +62,7 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
     result = out.result;
     gated = out.gated;
     rejectedCount = out.rejected.length;
+    rejectedQuestionCount = out.rejectedQuestions.length;
     specialists = out.specialists;
     telemetry = out.telemetry;
   } catch (error) {
@@ -82,10 +84,13 @@ export async function runReview(config: ReviewConfig, previousReview?: ReviewRes
   }
 
   const durationSec = (Date.now() - reviewStart) / 1000;
+  const droppedParts: string[] = [];
+  if (rejectedCount > 0) droppedParts.push(`${rejectedCount} finding${rejectedCount === 1 ? "" : "s"}`);
+  if (rejectedQuestionCount > 0) droppedParts.push(`${rejectedQuestionCount} question${rejectedQuestionCount === 1 ? "" : "s"}`);
   const tail = gated
     ? `${c.green}gated${c.reset}`
-    : rejectedCount > 0
-    ? `${c.dim}(${rejectedCount} dropped by validator)${c.reset}`
+    : droppedParts.length > 0
+    ? `${c.dim}(${droppedParts.join(", ")} dropped by validator)${c.reset}`
     : "";
   reviewSpinner.stop(`${label} complete in ${c.yellow}${durationSec.toFixed(1)}s${c.reset} ${tail}`);
 
