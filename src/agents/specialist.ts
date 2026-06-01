@@ -38,6 +38,8 @@ function truncateDiff(diff: string): string {
 export interface SpecialistInput {
   prData: PRData;
   projectRules?: string;
+  /** Formatted Linear ticket context, if available. */
+  ticketContext?: string;
 }
 
 export interface SpecialistDefinition {
@@ -66,7 +68,7 @@ ${SHARED_RUBRIC}`;
     name: def.name,
     model: def.model,
     system,
-    user: ({ prData, projectRules }) => {
+    user: ({ prData, projectRules, ticketContext }) => {
       const diff = truncateDiff(prData.diff);
       const files = prData.files.map((f) => f.filename).join("\n  ");
       let msg = `Review this PR strictly within your focus area.
@@ -79,6 +81,14 @@ ${SHARED_RUBRIC}`;
 \`\`\`diff
 ${diff}
 \`\`\``;
+      if (ticketContext && ticketContext.trim().length > 0) {
+        msg += `
+
+---
+**LINEAR TICKET CONTEXT**:
+
+${ticketContext}`;
+      }
       if (projectRules && projectRules.trim().length > 0) {
         msg += `
 
