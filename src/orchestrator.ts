@@ -2,6 +2,7 @@ import type { Octokit } from "@octokit/rest";
 import type { PRData, ReviewComment, ReviewResult } from "./types.js";
 import { runCorrectnessAgent } from "./agents/correctness.js";
 import { runValidator } from "./agents/validator.js";
+import { runQuestionsValidator } from "./agents/questionsValidator.js";
 import { runSecuritySpecialist } from "./agents/security.js";
 import { runPerformanceSpecialist } from "./agents/performance.js";
 import { runTestsSpecialist } from "./agents/tests.js";
@@ -10,6 +11,7 @@ import { APIError, describeAPIError } from "./agents/runner.js";
 import type { AgentTelemetry } from "./agents/types.js";
 import { decideGate, gateAutoApprove } from "./preflight.js";
 import { fetchClaudeMd, formatClaudeMdContext } from "./context/fetchClaudeMd.js";
+import { extractTicketId, fetchLinearTicket, formatLinearTicketContext } from "./context/fetchLinearTicket.js";
 import { selectSpecialists } from "./context/selectSpecialists.js";
 import type { SpecialistName } from "./context/selectSpecialists.js";
 import { dedupeFindings, rankFindings, splitFindings } from "./aggregate.js";
@@ -30,6 +32,8 @@ export interface OrchestratorOutput {
   telemetry: AgentTelemetry[];
   /** Findings dropped by the validator pass (kept for diagnostics, not posted). */
   rejected: Array<{ finding: ReviewComment; reason: string }>;
+  /** Questions dropped by the questions-validator pass (kept for diagnostics). */
+  rejectedQuestions: Array<{ question: string; reason: string }>;
   /** True if the result is a fallback APPROVE due to API error. */
   fallback: boolean;
   /** True if the preflight gate auto-approved without running the model pipeline. */
@@ -69,6 +73,7 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
       result: gateAutoApprove(gate.reason),
       telemetry,
       rejected: [],
+      rejectedQuestions: [],
       fallback: false,
       gated: true,
       specialists: [],
@@ -78,8 +83,11 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
   const specialists = selectSpecialists(input.prData);
 
   try {
-    // Stage 1 — context enrichment (CLAUDE.md). Best-effort; failures are silent.
-    const projectRules = await loadProjectRules(input);
+    // Stage 1 — context enrichment (CLAUDE.md + Linear ticket). Best-effort; failures are silent.
+    const [projectRules, ticketContext] = await Promise.all([
+      loadProjectRules(input),
+      loadTicketContext(input.prData),
+    ]);
 
     // Stage 2 — detect (correctness + specialists in parallel).
     // Specialist failures degrade silently — losing one specialist beats killing
@@ -88,9 +96,10 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
       prData: input.prData,
       previous: input.previous,
       projectRules,
+      ticketContext,
     });
 
-    const specialistInput = { prData: input.prData, projectRules };
+    const specialistInput = { prData: input.prData, projectRules, ticketContext };
     const specialistPromises = specialists.map((name) => safeSpecialist(name, specialistInput));
 
     const [correctnessRun, ...specialistRuns] = await Promise.all([correctnessPromise, ...specialistPromises]);
@@ -105,22 +114,17 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
     // Stage 3 — aggregate (pre-validate)
     const merged = dedupeFindings([...candidate.blocking, ...candidate.non_blocking, ...specialistFindings]);
 
-    if (merged.length === 0) {
-      const result: ReviewResult = {
-        ...candidate,
-        blocking: [],
-        non_blocking: [],
-        verdict: candidate.questions.length > 0 ? "NEEDS_DISCUSSION" : "APPROVE",
-      };
-      return { result, telemetry, rejected: [], fallback: false, gated: false, specialists };
+    // Stage 4 — validate findings + questions in parallel.
+    // Both validators default to confirmed=true on failure (see safe* helpers) so
+    // a parse hiccup doesn't silently drop real signals.
+    const [findingValidations, questionValidations] = await Promise.all([
+      Promise.all(merged.map((finding) => safeValidate(input.prData, finding))),
+      Promise.all(candidate.questions.map((question) => safeValidateQuestion(input.prData, question))),
+    ]);
+    for (const v of findingValidations) {
+      if (v.telemetry) telemetry.push(v.telemetry);
     }
-
-    // Stage 4 — validate (parallel). Validator failures default to confirmed=true
-    // so we don't silently drop real findings on a parse hiccup.
-    const validations = await Promise.all(
-      merged.map((finding) => safeValidate(input.prData, finding))
-    );
-    for (const v of validations) {
+    for (const v of questionValidations) {
       if (v.telemetry) telemetry.push(v.telemetry);
     }
 
@@ -129,9 +133,18 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
     const rejected: Array<{ finding: ReviewComment; reason: string }> = [];
     for (let i = 0; i < merged.length; i++) {
       const finding = merged[i]!;
-      const v = validations[i]!;
+      const v = findingValidations[i]!;
       if (v.confirmed) confirmed.push(finding);
       else rejected.push({ finding, reason: v.reason });
+    }
+
+    const confirmedQuestions: string[] = [];
+    const rejectedQuestions: Array<{ question: string; reason: string }> = [];
+    for (let i = 0; i < candidate.questions.length; i++) {
+      const question = candidate.questions[i]!;
+      const v = questionValidations[i]!;
+      if (v.confirmed) confirmedQuestions.push(question);
+      else rejectedQuestions.push({ question, reason: v.reason });
     }
 
     const ranked = rankFindings(confirmed);
@@ -141,15 +154,17 @@ export async function orchestrate(input: OrchestratorInput): Promise<Orchestrato
       ...candidate,
       blocking,
       non_blocking,
-      verdict: recomputeVerdict(blocking, candidate.questions),
+      questions: confirmedQuestions,
+      verdict: recomputeVerdict(blocking, confirmedQuestions),
     };
-    return { result, telemetry, rejected, fallback: false, gated: false, specialists };
+    return { result, telemetry, rejected, rejectedQuestions, fallback: false, gated: false, specialists };
   } catch (error) {
     if (error instanceof APIError) {
       return {
         result: buildFallbackApprove(error),
         telemetry,
         rejected: [],
+        rejectedQuestions: [],
         fallback: true,
         gated: false,
         specialists,
@@ -174,6 +189,24 @@ async function loadProjectRules(input: OrchestratorInput): Promise<string | unde
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Loads Linear ticket context for the PR. Best-effort: missing API key, missing
+ * ticket ID, or any Linear failure resolves to undefined and the review proceeds
+ * without ticket context.
+ */
+async function loadTicketContext(prData: PRData): Promise<string | undefined> {
+  const apiKey = process.env.LINEAR_API_KEY;
+  if (!apiKey) return undefined;
+
+  const id = extractTicketId(prData);
+  if (!id) return undefined;
+
+  const ticket = await fetchLinearTicket(id, apiKey);
+  if (!ticket) return undefined;
+
+  return formatLinearTicketContext(ticket);
 }
 
 /**
@@ -213,6 +246,27 @@ async function safeValidate(
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`[orchestrator] validator failed for ${finding.file}:${finding.line} — keeping finding (${msg})`);
     return { confirmed: true, reason: "validator failed; finding preserved by default" };
+  }
+}
+
+/**
+ * Runs the questions validator and defaults to confirmed=false on failure.
+ * Asymmetric to safeValidate on purpose: a hallucinated question that survives
+ * is worse than a real question dropped, because the broken state was exactly
+ * "everything becomes NEEDS_DISCUSSION". On failure, drop the question.
+ */
+async function safeValidateQuestion(
+  prData: PRData,
+  question: string
+): Promise<{ confirmed: boolean; reason: string; telemetry?: AgentTelemetry }> {
+  try {
+    const run = await runQuestionsValidator({ prData, question });
+    return { confirmed: run.output.confirmed, reason: run.output.reason, telemetry: run.telemetry };
+  } catch (error) {
+    if (error instanceof APIError) throw error;
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[orchestrator] q-validator failed — dropping question (${msg})`);
+    return { confirmed: false, reason: "q-validator failed; question dropped by default" };
   }
 }
 

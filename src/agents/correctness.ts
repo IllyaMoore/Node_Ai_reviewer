@@ -40,11 +40,32 @@ DO NOT FLAG:
 
 Bias: when uncertain, do NOT flag. False positives are more harmful than missed style nits. The PR author should leave every flagged item thinking "yes, that is genuinely broken."`;
 
+const QUESTIONS_RUBRIC = `QUESTIONS RUBRIC — apply strictly:
+
+The default state of \`questions\` is an EMPTY ARRAY. Questions are the exception, not the rule. A question survives validation only when ALL of the following hold:
+
+- It describes a concrete architectural or behavioural fork in the diff where two legitimate implementations exist and the choice is non-obvious.
+- A reasonable author would think "yes, I should answer this before this merges."
+- The answer is NOT already visible in the diff, types, comments, tests, or PR description.
+
+DO NOT add a question that:
+- Is rhetorical ("have you considered…?", "is this intentional?", "are you sure?").
+- Is a thinly veiled suggestion ("could you also…?", "what about adding…?", "should we extract this?").
+- Asks for confirmation of something the code already demonstrates.
+- Is a style/naming preference framed as a question.
+- Is "could you clarify X?" where X is explained in the diff, tests, types, or PR body.
+- Is hedging — asking instead of flagging because you are not confident enough to flag. Flag or drop, never hedge.
+- Is generic "did you test this?" without pointing at a specific gap.
+
+If you have nothing that meets the bar, return \`"questions": []\`. NEEDS_DISCUSSION is reserved for real, unresolved architectural decisions — not for "let's chat about this PR".`;
+
 const SYSTEM = `You are a senior Node.js/TypeScript engineer reviewing a PR. You are the broad-spectrum reviewer; specialists handle security, performance, tests, and dependencies separately.
 
 ${GLADOS_PERSONA}
 
 ${HIGH_SIGNAL_RUBRIC}
+
+${QUESTIONS_RUBRIC}
 
 Output rules:
 - Exact file paths and line numbers (must match a line that appears in the diff).
@@ -67,13 +88,15 @@ export interface CorrectnessInput {
   previous?: ReviewResult;
   /** Concatenated CLAUDE.md content from root + touched directories, if available. */
   projectRules?: string;
+  /** Formatted Linear ticket context, if the PR references a ticket and Linear is reachable. */
+  ticketContext?: string;
 }
 
 const REQUEST: AgentRequest<CorrectnessInput> = {
   name: "correctness",
   model: "sonnet",
   system: SYSTEM,
-  user: ({ prData, previous, projectRules }) => {
+  user: ({ prData, previous, projectRules, ticketContext }) => {
     const diff = truncateDiff(prData.diff);
     const files = prData.files.map((f) => f.filename).join("\n  ");
     let msg = `Review this PR.
@@ -86,6 +109,15 @@ const REQUEST: AgentRequest<CorrectnessInput> = {
 \`\`\`diff
 ${diff}
 \`\`\``;
+
+    if (ticketContext && ticketContext.trim().length > 0) {
+      msg += `
+
+---
+**LINEAR TICKET CONTEXT**:
+
+${ticketContext}`;
+    }
 
     if (projectRules && projectRules.trim().length > 0) {
       msg += `
