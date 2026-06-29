@@ -1,0 +1,1 @@
+{"version":3,"file":"selectSpecialists.d.ts","sourceRoot":"","sources":["../../src/context/selectSpecialists.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,MAAM,EAAE,MAAM,aAAa,CAAC;AAE1C,MAAM,MAAM,cAAc,GAAG,UAAU,GAAG,aAAa,GAAG,OAAO,GAAG,cAAc,CAAC;AA2BnF;;;;GAIG;AACH,wBAAgB,iBAAiB,CAAC,MAAM,EAAE,MAAM,GAAG,cAAc,EAAE,CAoBlE"}
