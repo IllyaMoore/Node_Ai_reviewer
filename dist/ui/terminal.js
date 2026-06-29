@@ -1,0 +1,152 @@
+import { stdout } from "node:process";
+/** ANSI color/style helpers */
+export const c = {
+    reset: "\x1b[0m",
+    bold: "\x1b[1m",
+    dim: "\x1b[2m",
+    italic: "\x1b[3m",
+    underline: "\x1b[4m",
+    red: "\x1b[31m",
+    green: "\x1b[32m",
+    yellow: "\x1b[33m",
+    blue: "\x1b[34m",
+    magenta: "\x1b[35m",
+    cyan: "\x1b[36m",
+    white: "\x1b[37m",
+    bgCyan: "\x1b[46m",
+    bgMagenta: "\x1b[45m",
+    clearLine: "\x1b[2K\x1b[0G",
+    clearScreen: "\x1b[2J\x1b[3J\x1b[H",
+    hideCursor: "\x1b[?25l",
+    showCursor: "\x1b[?25h",
+};
+/** Clears the terminal and moves cursor to top-left */
+export function clear() {
+    stdout.write(c.clearScreen);
+}
+/** Returns a formatted timestamp string */
+export function ts() {
+    return `${c.dim}[${new Date().toTimeString().slice(0, 8)}]${c.reset}`;
+}
+/** Logs a message with timestamp */
+export function log(msg) {
+    console.log(`${ts()} ${msg}`);
+}
+/** Logs an error with timestamp */
+export function logError(msg) {
+    console.error(`${ts()} ${c.red}${msg}${c.reset}`);
+}
+/** Draws a progress bar with percentage */
+export function progressBar(current, total, label) {
+    const width = 30;
+    const pct = total > 0 ? current / total : 0;
+    const filled = Math.round(width * pct);
+    const empty = width - filled;
+    const bar = `${c.yellow}${"█".repeat(filled)}${c.dim}${"░".repeat(empty)}${c.reset}`;
+    const percent = `${Math.round(pct * 100)}%`.padStart(4);
+    stdout.write(`${c.clearLine}  ${bar} ${c.bold}${percent}${c.reset}  ${c.dim}${label}${c.reset}`);
+}
+/** Truncates a string to max length */
+export function truncate(str, max) {
+    return str.length > max ? str.slice(0, max - 1) + "…" : str;
+}
+// ─── Box Drawing ────────────────────────────────────────────
+/** Draws a box around content lines */
+export function box(lines, width = 44) {
+    const top = `  ${c.yellow}╭${"─".repeat(width)}╮${c.reset}`;
+    const bot = `  ${c.yellow}╰${"─".repeat(width)}╯${c.reset}`;
+    const rows = lines.map((l) => {
+        // Strip ANSI for length calculation
+        const stripped = l.replace(/\x1b\[[0-9;]*m/g, "");
+        const pad = width - 2 - stripped.length;
+        return `  ${c.yellow}│${c.reset} ${l}${" ".repeat(Math.max(0, pad))} ${c.yellow}│${c.reset}`;
+    });
+    return [top, ...rows, bot].join("\n");
+}
+/** Draws a horizontal rule with optional label */
+export function hr(width = 50, label) {
+    if (!label)
+        return `${c.dim}${"─".repeat(width)}${c.reset}`;
+    const labelStr = ` ${label} `;
+    const side = Math.max(0, Math.floor((width - labelStr.length) / 2));
+    return `${c.dim}${"─".repeat(side)}${c.reset}${labelStr}${c.dim}${"─".repeat(width - side - labelStr.length)}${c.reset}`;
+}
+// ─── Spinner ────────────────────────────────────────────────
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/** Creates an animated spinner. Call .stop() when done. Auto-cleans after 5 min. */
+export function createSpinner(message) {
+    let i = 0;
+    let stopped = false;
+    let currentMsg = message;
+    stdout.write(c.hideCursor);
+    const timer = setInterval(() => {
+        const frame = SPINNER_FRAMES[i % SPINNER_FRAMES.length];
+        stdout.write(`${c.clearLine}${ts()} ${c.yellow}${frame}${c.reset} ${currentMsg}`);
+        i++;
+    }, 80);
+    // Auto-cleanup after 5 minutes to prevent leaked timers
+    const timeout = setTimeout(() => {
+        if (!stopped) {
+            stopped = true;
+            clearInterval(timer);
+            stdout.write(`${c.clearLine}${ts()} ${c.yellow}!${c.reset} Spinner timed out\n`);
+            stdout.write(c.showCursor);
+        }
+    }, 300_000);
+    return {
+        update(msg) {
+            currentMsg = msg;
+        },
+        stop(finalMsg) {
+            if (stopped)
+                return;
+            stopped = true;
+            clearInterval(timer);
+            clearTimeout(timeout);
+            stdout.write(`${c.clearLine}${ts()} ${c.green}✓${c.reset} ${finalMsg}\n`);
+            stdout.write(c.showCursor);
+        },
+    };
+}
+// ─── Score Bar ──────────────────────────────────────────────
+/** Renders a colored score bar: ████░░░░░░ 4/10 */
+export function scoreBar(score, max = 10) {
+    const width = 10;
+    const filled = Math.round((score / max) * width);
+    const empty = width - filled;
+    const color = score >= 7 ? c.green : score >= 4 ? c.yellow : c.red;
+    return `${color}${"█".repeat(filled)}${c.dim}${"░".repeat(empty)}${c.reset} ${color}${c.bold}${score}${c.reset}${c.dim}/${max}${c.reset}`;
+}
+// ─── Animated Banner ────────────────────────────────────────
+/** Prints the banner with line-by-line animation */
+export async function animateBanner(lines) {
+    stdout.write(c.hideCursor);
+    for (const line of lines) {
+        console.log(line);
+        await sleep(30);
+    }
+    stdout.write(c.showCursor);
+}
+/** Simple delay helper */
+export function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+// ─── Raw Key Reader ─────────────────────────────────────────
+/** Reads a single keypress in raw mode. Returns the key string. */
+export function readKey() {
+    return new Promise((resolve) => {
+        const { stdin } = process;
+        stdin.setRawMode(true);
+        stdin.resume();
+        stdin.once("data", (data) => {
+            stdin.setRawMode(false);
+            const key = data.toString();
+            if (key === "\x03") {
+                stdout.write(c.showCursor);
+                process.exit(0);
+            }
+            resolve(key);
+        });
+    });
+}
+//# sourceMappingURL=terminal.js.map

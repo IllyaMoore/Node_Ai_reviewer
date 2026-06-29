@@ -4,10 +4,10 @@ import { ReviewParseError } from "../types.js";
 import type { AgentRequest, AgentRunResult, ModelTier } from "./types.js";
 
 /** Concrete Anthropic model IDs per tier. Update here when bumping models. */
-const MODEL_IDS: Record<ModelTier, string> = {
+export const MODEL_IDS: Record<ModelTier, string> = {
   haiku: "claude-haiku-4-5-20251001",
-  sonnet: "claude-sonnet-4-20250514",
-  opus: "claude-opus-4-1",
+  sonnet: "claude-sonnet-4-6",
+  opus: "claude-opus-4-7",
 };
 
 /** Default max output tokens per tier — tuned to typical agent output sizes. */
