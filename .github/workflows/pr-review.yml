@@ -2,7 +2,7 @@ name: PR Review Bot
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, reopened]
 
 permissions:
   contents: read
